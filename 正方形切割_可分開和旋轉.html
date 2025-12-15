@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <title>精確切割與拼砌工具</title>
+    <style>
+        body { font-family: "Microsoft JhengHei", sans-serif; display: flex; flex-direction: column; align-items: center; background: #f0f2f5; margin: 0; padding: 20px; user-select: none; }
+        .header { text-align: center; margin-bottom: 10px; }
+        .canvas-container { position: relative; box-shadow: 0 10px 30px rgba(0,0,0,0.15); border-radius: 8px; overflow: hidden; }
+        canvas { background: #ffffff; cursor: crosshair; display: block; }
+        .controls { margin-top: 20px; gap: 12px; display: flex; flex-wrap: wrap; justify-content: center; }
+        button { padding: 10px 20px; font-size: 14px; cursor: pointer; border: none; border-radius: 5px; transition: 0.2s; font-weight: bold; color: white; }
+        .btn-confirm { background: #2f9e44; }
+        .btn-undo { background: #f08c00; }
+        .btn-reset { background: #e03131; }
+        button:hover { filter: brightness(1.1); transform: translateY(-1px); }
+        .info-panel { margin-top: 15px; background: #fff; padding: 15px; border-radius: 8px; font-size: 13px; color: #444; border: 1px solid #ddd; width: 100%; max-width: 570px; }
+        .key { background: #f8f9fa; border: 1px solid #adb5bd; padding: 2px 6px; border-radius: 4px; font-family: monospace; font-weight: bold; }
+        .status { position: absolute; top: 10px; left: 10px; background: rgba(255,255,255,0.8); padding: 5px 10px; border-radius: 4px; font-size: 12px; pointer-events: none; }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h2>幾何拼砌切割工具</h2>
+    </div>
+
+    <div class="canvas-container">
+        <canvas id="canvas" width="600" height="600"></canvas>
+        <div id="status" class="status">選取物件來查看角度</div>
+    </div>
+
+    <div class="info-panel">
+        <b>💡 拼砌技巧：</b><br>
+        • <b>微調旋轉</b>：點擊圖塊後，滾動滾輪或按 <span class="key">A</span> / <span class="key">D</span>，每次旋轉 <span style="color:red">1°</span>。<br>
+        • <b>快速吸附</b>：按住 <span class="key">Shift</span> 鍵再旋轉，會自動吸附到 <span style="color:blue">15° / 45° / 90°</span>。<br>
+        • <b>精確移動</b>：選取圖塊後，使用鍵盤 <span class="key">↑</span> <span class="key">↓</span> <span class="key">←</span> <span class="key">→</span> 可進行 1 像素微移。
+    </div>
+
+    <div class="controls">
+        <button class="btn-undo" onclick="undo()">上一步 (Undo)</button>
+        <button class="btn-reset" onclick="reset()">清空重置</button>
+        <button class="btn-confirm" onclick="confirmCut()">確認切割 (Confirm)</button>
+    </div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const statusDiv = document.getElementById('status');
+
+// 角度單位轉換
+const TO_RAD = Math.PI / 180;
+const TO_DEG = 180 / Math.PI;
+
+class Polygon {
+    constructor(vertices, x, y, color) {
+        this.vertices = vertices; 
+        this.x = x;               
+        this.y = y;               
+        this.rotation = 0; // 弧度
+        this.color = color || `hsla(${Math.random() * 360}, 65%, 60%, 0.7)`;
+    }
+}
+
+let polygons = [];
+let pendingLines = [];
+let history = [];
+let interactionMode = 'idle'; 
+let startPoint = null;
+let currentMousePos = null;
+let selectedPolyIndex = -1;
+let dragOffset = { x: 0, y: 0 };
+let isShiftPressed = false;
+
+function init() {
+    const size = 260;
+    const half = size / 2;
+    const vertices = [{x: -half, y: -half}, {x: half, y: -half}, {x: half, y: half}, {x: -half, y: half}];
+    polygons = [new Polygon(vertices, 300, 300, '#339af0')];
+    history = [];
+    pendingLines = [];
+    selectedPolyIndex = -1;
+    draw();
+}
+
+function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    drawGrid();
+
+    polygons.forEach((poly, index) => {
+        ctx.save();
+        ctx.translate(poly.x, poly.y);
+        ctx.rotate(poly.rotation);
+
+        ctx.beginPath();
+        if (poly.vertices.length > 0) {
+            ctx.moveTo(poly.vertices[0].x, poly.vertices[0].y);
+            for(let i = 1; i < poly.vertices.length; i++) ctx.lineTo(poly.vertices[i].x, poly.vertices[i].y);
+        }
+        ctx.closePath();
+        
+        ctx.fillStyle = poly.color;
+        ctx.fill();
+        
+        const isSelected = (index === selectedPolyIndex);
+        ctx.lineWidth = isSelected ? 3 : 1.5;
+        ctx.strokeStyle = isSelected ? '#e67e22' : '#212529';
+        ctx.stroke();
+
+        // 繪製中心點標記
+        if(isSelected) {
+            ctx.fillStyle = '#e67e22';
+            ctx.fillRect(-3, -3, 6, 6);
+        }
+
+        ctx.restore();
+    });
+
+    // 繪製切割線
+    ctx.setLineDash([8, 4]);
+    ctx.strokeStyle = '#fa5252';
+    pendingLines.forEach(line => {
+        ctx.beginPath(); ctx.moveTo(line.p1.x, line.p1.y); ctx.lineTo(line.p2.x, line.p2.y); ctx.stroke();
+    });
+
+    if (interactionMode === 'drawingLine' && startPoint && currentMousePos) {
+        ctx.beginPath(); ctx.moveTo(startPoint.x, startPoint.y); ctx.lineTo(currentMousePos.x, currentMousePos.y); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    updateStatus();
+}
+
+function drawGrid() {
+    ctx.strokeStyle = '#f1f3f5';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= canvas.width; i += 20) {
+        ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, canvas.height); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(canvas.width, i); ctx.stroke();
+    }
+}
+
+function updateStatus() {
+    if (selectedPolyIndex !== -1) {
+        const deg = Math.round((polygons[selectedPolyIndex].rotation * TO_DEG) % 360);
+        statusDiv.innerText = `選取中 - 角度: ${deg}° (Shift+旋轉可吸附)`;
+    } else {
+        statusDiv.innerText = `模式: ${pendingLines.length > 0 ? '待確認切割' : '可拉線切割或搬移'}`;
+    }
+}
+
+// 核心功能：角度旋轉微調與吸附
+function rotateSelected(direction) {
+    if (selectedPolyIndex === -1) return;
+    const poly = polygons[selectedPolyIndex];
+    let step = 1 * TO_RAD; // 基礎步進 1 度
+    
+    if (isShiftPressed) {
+        // 吸附功能：尋找最接近的 15 度倍數
+        let currentDeg = poly.rotation * TO_DEG;
+        let targetDeg = direction > 0 ? currentDeg + 15 : currentDeg - 15;
+        poly.rotation = Math.round(targetDeg / 15) * 15 * TO_RAD;
+    } else {
+        poly.rotation += direction * step;
+    }
+    draw();
+}
+
+// 鍵盤監聽
+window.addEventListener('keydown', (e) => {
+    if (e.key === 'Shift') isShiftPressed = true;
+    if (selectedPolyIndex !== -1) {
+        const poly = polygons[selectedPolyIndex];
+        switch(e.key.toLowerCase()) {
+            case 'a': rotateSelected(-1); break;
+            case 'd': rotateSelected(1); break;
+            case 'arrowleft': poly.x -= 1; draw(); break;
+            case 'arrowright': poly.x += 1; draw(); break;
+            case 'arrowup': poly.y -= 1; draw(); break;
+            case 'arrowdown': poly.y += 1; draw(); break;
+        }
+    }
+});
+
+window.addEventListener('keyup', (e) => {
+    if (e.key === 'Shift') isShiftPressed = false;
+});
+
+canvas.addEventListener('wheel', (e) => {
+    if (selectedPolyIndex !== -1) {
+        e.preventDefault();
+        rotateSelected(e.deltaY > 0 ? 1 : -1);
+    }
+}, { passive: false });
+
+// 獲取位置
+function getMousePos(e) {
+    const rect = canvas.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+}
+
+canvas.addEventListener('mousedown', (e) => {
+    const pos = getMousePos(e);
+    let clickedIndex = -1;
+
+    for (let i = polygons.length - 1; i >= 0; i--) {
+        if (isPointInPolygon(pos, polygons[i])) {
+            clickedIndex = i;
+            break;
+        }
+    }
+
+    if (clickedIndex !== -1) {
+        interactionMode = 'draggingPiece';
+        selectedPolyIndex = clickedIndex;
+        dragOffset.x = pos.x - polygons[selectedPolyIndex].x;
+        dragOffset.y = pos.y - polygons[selectedPolyIndex].y;
+        const selected = polygons.splice(selectedPolyIndex, 1)[0];
+        polygons.push(selected);
+        selectedPolyIndex = polygons.length - 1;
+    } else {
+        interactionMode = 'drawingLine';
+        startPoint = pos;
+        selectedPolyIndex = -1;
+    }
+    draw();
+});
+
+canvas.addEventListener('mousemove', (e) => {
+    currentMousePos = getMousePos(e);
+    if (interactionMode === 'draggingPiece' && selectedPolyIndex !== -1) {
+        polygons[selectedPolyIndex].x = currentMousePos.x - dragOffset.x;
+        polygons[selectedPolyIndex].y = currentMousePos.y - dragOffset.y;
+        draw();
+    } else if (interactionMode === 'drawingLine') {
+        draw();
+    }
+});
+
+window.addEventListener('mouseup', () => {
+    if (interactionMode === 'drawingLine' && startPoint && currentMousePos) {
+        if (Math.hypot(currentMousePos.x - startPoint.x, currentMousePos.y - startPoint.y) > 15) {
+            pendingLines.push({ p1: {...startPoint}, p2: {...currentMousePos} });
+        }
+    }
+    interactionMode = 'idle';
+    startPoint = null;
+    draw();
+});
+
+// 切割計算 (同前邏輯，但增加穩定性)
+function confirmCut() {
+    if (pendingLines.length === 0) return;
+    saveHistory();
+
+    let newPolys = [];
+    polygons.forEach(poly => {
+        let pieceVerts = [getAbsoluteVertices(poly)];
+        pendingLines.forEach(line => {
+            let nextPass = [];
+            pieceVerts.forEach(vs => {
+                const split = splitPolygonGeometry(vs, line);
+                nextPass.push(...split);
+            });
+            pieceVerts = nextPass;
+        });
+        pieceVerts.forEach(vs => newPolys.push(createNewPolygon(vs, poly.color)));
+    });
+
+    polygons = newPolys;
+    pendingLines = [];
+    selectedPolyIndex = -1;
+    draw();
+}
+
+function getAbsoluteVertices(poly) {
+    const c = Math.cos(poly.rotation), s = Math.sin(poly.rotation);
+    return poly.vertices.map(v => ({ x: poly.x + (v.x*c - v.y*s), y: poly.y + (v.x*s + v.y*c) }));
+}
+
+function createNewPolygon(vertices, color) {
+    let cx = 0, cy = 0;
+    vertices.forEach(v => { cx += v.x; cy += v.y; });
+    cx /= vertices.length; cy /= vertices.length;
+    return new Polygon(vertices.map(v => ({ x: v.x - cx, y: v.y - cy })), cx, cy, color);
+}
+
+function splitPolygonGeometry(vertices, line) {
+    const p1 = line.p1, p2 = line.p2;
+    const side = (p) => (p2.x - p1.x) * (p.y - p1.y) - (p2.y - p1.y) * (p.x - p1.x);
+    const left = [], right = [];
+    for (let i = 0; i < vertices.length; i++) {
+        const curr = vertices[i], next = vertices[(i + 1) % vertices.length];
+        const sC = side(curr), sN = side(next);
+        if (sC >= 0) left.push(curr);
+        if (sC <= 0) right.push(curr);
+        if (sC * sN < 0) {
+            const t = Math.abs(sC) / (Math.abs(sC) + Math.abs(sN));
+            const inter = { x: curr.x + t * (next.x - curr.x), y: curr.y + t * (next.y - curr.y) };
+            left.push(inter); right.push(inter);
+        }
+    }
+    return (left.length >= 3 && right.length >= 3) ? [left, right] : [vertices];
+}
+
+function isPointInPolygon(p, poly) {
+    const vs = getAbsoluteVertices(poly);
+    let inside = false;
+    for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
+        if (((vs[i].y > p.y) !== (vs[j].y > p.y)) && (p.x < (vs[j].x - vs[i].x) * (p.y - vs[i].y) / (vs[j].y - vs[i].y) + vs[i].x)) inside = !inside;
+    }
+    return inside;
+}
+
+function saveHistory() {
+    history.push(JSON.stringify(polygons));
+    if (history.length > 30) history.shift();
+}
+
+function undo() {
+    if (pendingLines.length > 0) pendingLines.pop();
+    else if (history.length > 0) {
+        const data = JSON.parse(history.pop());
+        polygons = data.map(d => {
+            const p = new Polygon(d.vertices, d.x, d.y, d.color);
+            p.rotation = d.rotation;
+            return p;
+        });
+    }
+    selectedPolyIndex = -1;
+    draw();
+}
+
+function reset() { if (confirm("確定重置嗎？")) init(); }
+
+init();
+</script>
+</body>
+</html>
