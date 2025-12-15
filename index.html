@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <title>正方形切割工具 - 修正版</title>
+    <style>
+        body { font-family: "Microsoft JhengHei", sans-serif; display: flex; flex-direction: column; align-items: center; background: #f8f9fa; user-select: none; margin: 0; padding: 20px; }
+        .header { text-align: center; margin-bottom: 15px; }
+        canvas { border: 3px solid #343a40; background: #ffffff; cursor: crosshair; box-shadow: 0 10px 25px rgba(0,0,0,0.1); }
+        .controls { margin-top: 20px; gap: 15px; display: flex; flex-wrap: wrap; justify-content: center; }
+        button { padding: 12px 24px; font-size: 15px; cursor: pointer; border: none; border-radius: 6px; transition: all 0.2s; font-family: inherit; font-weight: 600; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .btn-confirm { background: #28a745; color: white; }
+        .btn-undo { background: #ffc107; color: #212529; }
+        .btn-reset { background: #dc3545; color: white; }
+        button:hover { opacity: 0.9; transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.2); }
+        button:active { transform: translateY(0); }
+        .instructions { color: #495057; max-width: 600px; line-height: 1.6; background: #e9ecef; padding: 15px; border-radius: 8px; margin-bottom: 15px; border-left: 5px solid #007bff; }
+        kbd { background: #eee; border-radius: 3px; border: 1px solid #ccc; padding: 1px 5px; font-size: 12px; }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h2>互動式正方形切割工具</h2>
+    </div>
+
+    <div class="instructions">
+        <b>操作指南：</b><br>
+        1. <b>切割</b>：在正方形上或空白處<b>拖曳滑鼠</b>拉出紅線，然後點擊「確認切割」。<br>
+        2. <b>移動</b>：切割後，直接<b>點擊並拖曳</b>圖塊即可移動。<br>
+        3. <b>旋轉</b>：選取圖塊後，使用<b>滑鼠滾輪</b>，或按鍵盤 <kbd>A</kbd> <kbd>D</kbd>。
+    </div>
+
+    <canvas id="canvas" width="600" height="600"></canvas>
+
+    <div class="controls">
+        <button class="btn-undo" onclick="undo()">復原 (Undo)</button>
+        <button class="btn-reset" onclick="reset()">重置畫布</button>
+        <button class="btn-confirm" onclick="confirmCut()">確認切割 (Confirm)</button>
+    </div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+class Polygon {
+    constructor(vertices, x, y, color) {
+        this.vertices = vertices; 
+        this.x = x;               
+        this.y = y;               
+        this.rotation = 0;        
+        this.color = color || `hsla(${Math.random() * 360}, 70%, 65%, 0.7)`;
+    }
+}
+
+let polygons = [];
+let pendingLines = [];
+let history = [];
+let interactionMode = 'idle'; 
+let startPoint = null;
+let currentMousePos = null;
+let selectedPolyIndex = -1;
+let dragOffset = { x: 0, y: 0 };
+
+function init() {
+    const size = 300;
+    const half = size / 2;
+    // 初始正方形頂點
+    const vertices = [
+        {x: -half, y: -half}, {x: half, y: -half},
+        {x: half, y: half}, {x: -half, y: half}
+    ];
+    polygons = [new Polygon(vertices, 300, 300, '#4dabf7')];
+    history = [];
+    pendingLines = [];
+    selectedPolyIndex = -1;
+    draw();
+}
+
+function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // 繪製格線背景
+    drawGrid();
+
+    // 1. 繪製所有多邊形
+    polygons.forEach((poly, index) => {
+        ctx.save();
+        ctx.translate(poly.x, poly.y);
+        ctx.rotate(poly.rotation);
+
+        ctx.beginPath();
+        if (poly.vertices.length > 0) {
+            ctx.moveTo(poly.vertices[0].x, poly.vertices[0].y);
+            // 修正點：使用 poly.vertices.length
+            for(let i = 1; i < poly.vertices.length; i++) {
+                ctx.lineTo(poly.vertices[i].x, poly.vertices[i].y);
+            }
+        }
+        ctx.closePath();
+        
+        ctx.fillStyle = poly.color;
+        ctx.fill();
+        
+        ctx.lineWidth = (index === selectedPolyIndex) ? 4 : 2;
+        ctx.strokeStyle = (index === selectedPolyIndex) ? '#f08c00' : '#343a40';
+        ctx.stroke();
+
+        ctx.restore();
+    });
+
+    // 2. 繪製切割預覽線
+    ctx.setLineDash([10, 5]);
+    ctx.strokeStyle = '#fa5252';
+    ctx.lineWidth = 2;
+    pendingLines.forEach(line => {
+        ctx.beginPath();
+        ctx.moveTo(line.p1.x, line.p1.y);
+        ctx.lineTo(line.p2.x, line.p2.y);
+        ctx.stroke();
+    });
+
+    // 3. 繪製目前拖曳中的線
+    if (interactionMode === 'drawingLine' && startPoint && currentMousePos) {
+        ctx.beginPath();
+        ctx.moveTo(startPoint.x, startPoint.y);
+        ctx.lineTo(currentMousePos.x, currentMousePos.y);
+        ctx.stroke();
+    }
+    ctx.setLineDash([]);
+}
+
+function drawGrid() {
+    ctx.strokeStyle = '#f1f3f5';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= canvas.width; i += 50) {
+        ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, canvas.height); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(canvas.width, i); ctx.stroke();
+    }
+}
+
+// 事件處理
+function getMousePos(e) {
+    const rect = canvas.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+}
+
+canvas.addEventListener('mousedown', (e) => {
+    const pos = getMousePos(e);
+    let clickedIndex = -1;
+
+    for (let i = polygons.length - 1; i >= 0; i--) {
+        if (isPointInPolygon(pos, polygons[i])) {
+            clickedIndex = i;
+            break;
+        }
+    }
+
+    if (clickedIndex !== -1) {
+        interactionMode = 'draggingPiece';
+        selectedPolyIndex = clickedIndex;
+        dragOffset.x = pos.x - polygons[selectedPolyIndex].x;
+        dragOffset.y = pos.y - polygons[selectedPolyIndex].y;
+        // 將選中的移到最後，使其顯示在最上層
+        const selected = polygons.splice(selectedPolyIndex, 1)[0];
+        polygons.push(selected);
+        selectedPolyIndex = polygons.length - 1;
+    } else {
+        interactionMode = 'drawingLine';
+        startPoint = pos;
+        selectedPolyIndex = -1;
+    }
+    draw();
+});
+
+canvas.addEventListener('mousemove', (e) => {
+    currentMousePos = getMousePos(e);
+    if (interactionMode === 'draggingPiece' && selectedPolyIndex !== -1) {
+        polygons[selectedPolyIndex].x = currentMousePos.x - dragOffset.x;
+        polygons[selectedPolyIndex].y = currentMousePos.y - dragOffset.y;
+        draw();
+    } else if (interactionMode === 'drawingLine') {
+        draw();
+    }
+});
+
+window.addEventListener('mouseup', () => {
+    if (interactionMode === 'drawingLine' && startPoint && currentMousePos) {
+        if (Math.hypot(currentMousePos.x - startPoint.x, currentMousePos.y - startPoint.y) > 20) {
+            pendingLines.push({ p1: {...startPoint}, p2: {...currentMousePos} });
+        }
+    }
+    interactionMode = 'idle';
+    startPoint = null;
+    draw();
+});
+
+canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    if (selectedPolyIndex !== -1) {
+        polygons[selectedPolyIndex].rotation += (e.deltaY > 0 ? 0.1 : -0.1);
+        draw();
+    }
+});
+
+window.addEventListener('keydown', (e) => {
+    if (selectedPolyIndex !== -1) {
+        if (e.key.toLowerCase() === 'a') polygons[selectedPolyIndex].rotation -= 0.1;
+        if (e.key.toLowerCase() === 'd') polygons[selectedPolyIndex].rotation += 0.1;
+        draw();
+    }
+});
+
+// 切割邏輯
+function confirmCut() {
+    if (pendingLines.length === 0) return;
+    saveHistory();
+
+    let newPolygons = [];
+    polygons.forEach(poly => {
+        let pieces = [getAbsoluteVertices(poly)];
+        
+        pendingLines.forEach(line => {
+            let nextPieces = [];
+            pieces.forEach(verts => {
+                const result = splitPolygonGeometry(verts, line);
+                nextPieces.push(...result);
+            });
+            pieces = nextPieces;
+        });
+
+        pieces.forEach(verts => {
+            newPolygons.push(createNewPolygon(verts, poly.color));
+        });
+    });
+
+    polygons = newPolygons;
+    pendingLines = [];
+    selectedPolyIndex = -1;
+    draw();
+}
+
+function getAbsoluteVertices(poly) {
+    const cos = Math.cos(poly.rotation);
+    const sin = Math.sin(poly.rotation);
+    return poly.vertices.map(v => ({
+        x: poly.x + (v.x * cos - v.y * sin),
+        y: poly.y + (v.x * sin + v.y * cos)
+    }));
+}
+
+function createNewPolygon(vertices, color) {
+    let cx = 0, cy = 0;
+    vertices.forEach(v => { cx += v.x; cy += v.y; });
+    cx /= vertices.length;
+    cy /= vertices.length;
+
+    const relative = vertices.map(v => ({ x: v.x - cx, y: v.y - cy }));
+    return new Polygon(relative, cx, cy, color);
+}
+
+function splitPolygonGeometry(vertices, line) {
+    const p1 = line.p1, p2 = line.p2;
+    const side = (p) => (p2.x - p1.x) * (p.y - p1.y) - (p2.y - p1.y) * (p.x - p1.x);
+
+    const left = [], right = [];
+    for (let i = 0; i < vertices.length; i++) {
+        const curr = vertices[i], next = vertices[(i + 1) % vertices.length];
+        const sCurr = side(curr), sNext = side(next);
+
+        if (sCurr >= 0) left.push(curr);
+        if (sCurr <= 0) right.push(curr);
+
+        if (sCurr * sNext < 0) {
+            const t = Math.abs(sCurr) / (Math.abs(sCurr) + Math.abs(sNext));
+            const inter = { x: curr.x + t * (next.x - curr.x), y: curr.y + t * (next.y - curr.y) };
+            left.push(inter);
+            right.push(inter);
+        }
+    }
+    return (left.length >= 3 && right.length >= 3) ? [left, right] : [vertices];
+}
+
+function isPointInPolygon(p, poly) {
+    const vs = getAbsoluteVertices(poly);
+    let inside = false;
+    for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
+        if (((vs[i].y > p.y) !== (vs[j].y > p.y)) && (p.x < (vs[j].x - vs[i].x) * (p.y - vs[i].y) / (vs[j].y - vs[i].y) + vs[i].x)) inside = !inside;
+    }
+    return inside;
+}
+
+function saveHistory() {
+    history.push(JSON.stringify(polygons));
+    if (history.length > 20) history.shift();
+}
+
+function undo() {
+    if (pendingLines.length > 0) {
+        pendingLines.pop();
+    } else if (history.length > 0) {
+        const data = JSON.parse(history.pop());
+        polygons = data.map(d => {
+            const p = new Polygon(d.vertices, d.x, d.y, d.color);
+            p.rotation = d.rotation;
+            return p;
+        });
+    }
+    selectedPolyIndex = -1;
+    draw();
+}
+
+function reset() {
+    if (confirm("重置畫布？")) init();
+}
+
+init();
+</script>
+</body>
+</html>
